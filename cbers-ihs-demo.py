@@ -73,7 +73,7 @@ with rasterio.open(item.assets["BAND0"].href) as src:
     pan_window = get_window(src)
     pan = src.read(1, window=pan_window)
 
-# Interpolar bandas multi para 4m (imita compartamento no terraview)
+# Interpolar bandas para 4m (imita comportamento no terraview)
 target_shape = (pan.shape[0] // 2, pan.shape[1] // 2)
 r = resize(red.astype(float), target_shape, order=3)
 g = resize(green.astype(float), target_shape, order=3)
