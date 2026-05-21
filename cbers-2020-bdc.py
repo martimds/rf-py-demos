@@ -35,10 +35,10 @@ transformer = Transformer.from_crs("EPSG:4326", "EPSG:32721", always_xy=True)
 minx, miny = transformer.transform(bbox_sinop[0], bbox_sinop[1])
 maxx, maxy = transformer.transform(bbox_sinop[2], bbox_sinop[3])
 
-# Resolução alvo: 2m (resolução nativa do PAN, máxima qualidade)
+# Resolução alvo
 TARGET_RES = 2.0
 
-# Calcular tamanho do output com res 4m
+# Calcular tamanho do output
 width = int((maxx - minx) // TARGET_RES)
 height = int((maxy - miny) // TARGET_RES)
 maxx = minx + width * TARGET_RES
