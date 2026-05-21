@@ -9,3 +9,5 @@ uv.lock
 
 # Virtual environments
 .venv
+.DS_Store
+imagens/.DS_Store
