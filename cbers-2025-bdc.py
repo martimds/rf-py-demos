@@ -3,6 +3,8 @@ import os
 os.environ["GDAL_HTTP_MULTIPLEX"] = "YES"
 os.environ["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] = "YES"
 
+import time
+
 import numpy as np
 import pystac_client
 import rasterio
@@ -47,6 +49,8 @@ target_transform = transform_from_bounds(minx, miny, maxx, maxy, width, height)
 band_input = input("Insira a composição de bandas (ex: 321, 432): ")
 assert len(band_input) == 3, "Valor inválido, insira um valor com 3 dígitos: "
 band_indices = [int(b) for b in band_input]
+
+t0 = time.time()
 
 # Mapeamento número da banda -> nome do asset
 BAND_MAP = {1: "BAND1", 2: "BAND2", 3: "BAND3", 4: "BAND4"}
@@ -119,3 +123,4 @@ with rasterio.open(output_name, "w", **profile) as dst:
     dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue]
 
 print(f"Salvo: {output_name} ({width}x{height} px, 4m, EPSG:32721)")
+print(f"Tempo corrido: {time.time() - t0:.1f}s")
