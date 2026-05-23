@@ -1,9 +1,9 @@
+import concurrent.futures
 import os
-
-os.environ["GDAL_HTTP_MULTIPLEX"] = "YES"
-os.environ["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] = "YES"
-
 import time
+
+os.environ["GDAL_DISABLE_READDIR_ON_OPEN"] = "EMPTY_DIR"
+os.environ["CPL_VSIL_CURL_ALLOWED_EXTENSIONS"] = ".tif,.tiff"
 
 import numpy as np
 import pystac_client
@@ -55,10 +55,25 @@ t0 = time.time()
 # Mapeamento número da banda -> nome do asset
 BAND_MAP = {1: "BAND1", 2: "BAND2", 3: "BAND3", 4: "BAND4"}
 
+CACHE_DIR = "cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
 
-# Retornar banda multi recortada e reamostrada (lanczos)
-def read_band_resampled(asset_key, target_height, target_width):
-    with rasterio.open(item.assets[asset_key].href) as src:
+# Criar lista de assets e reamostragens
+assets = [BAND_MAP[b] for b in band_indices] + ["BAND0"]
+resamplings = [Resampling.lanczos] * 3 + [Resampling.nearest]
+
+
+# Baixar recorte remoto e salva no diretorio cache
+def download_crop(key, resampling):
+    local_path = os.path.join(CACHE_DIR, f"{item.id}_{key}_crop.tif")
+
+    # Verificar se o arquivo ja existe no cache
+    if os.path.exists(local_path):
+        print(f"Cache hit: {key}")
+        return local_path
+
+    print(f"Baixando recorte de {key}...")
+    with rasterio.open(item.assets[key].href) as src:
         window = (
             from_bounds(minx, miny, maxx, maxy, src.transform)
             .round_offsets()
@@ -67,27 +82,45 @@ def read_band_resampled(asset_key, target_height, target_width):
         data = src.read(
             1,
             window=window,
-            out_shape=(target_height, target_width),
-            resampling=Resampling.lanczos,
+            out_shape=(height, width),
+            resampling=resampling,
         )
-    return data.astype(np.float64)
+
+        profile = src.profile.copy()
+        profile.update(
+            driver="GTiff",
+            height=height,
+            width=width,
+            count=1,
+            dtype=data.dtype,
+            transform=target_transform,
+        )
+
+        with rasterio.open(local_path, "w", **profile) as dst:
+            dst.write(data, 1)
+
+    print(f"Concluído: {key}")
+    return local_path
 
 
-print(f"Lendo bandas {band_indices} e PAN, reamostrando para 4m...")
+# Baixar recortes em paralelo
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    futures = [
+        executor.submit(download_crop, key, r) for key, r in zip(assets, resamplings)
+    ]
+    local_paths = [f.result() for f in futures]
 
-# Ler as 3 bandas selecionadas
-bands = [read_band_resampled(BAND_MAP[b], height, width) for b in band_indices]
+print("Download concluído. Processando...")
 
-# Ler banda pan (vizinho mais proximo)
-with rasterio.open(item.assets["BAND0"].href) as src:
-    window = (
-        from_bounds(minx, miny, maxx, maxy, src.transform)
-        .round_offsets()
-        .round_lengths()
-    )
-    pan = src.read(
-        1, window=window, out_shape=(height, width), resampling=Resampling.nearest
-    ).astype(np.float64)
+
+# Ler banda do cache local
+def read_band(local_path):
+    with rasterio.open(local_path) as src:
+        return src.read(1).astype(np.float32)
+
+
+bands = [read_band(p) for p in local_paths[:3]]
+pan = read_band(local_paths[3])
 
 # Fusão IHS (FastIHS)
 intensity = (bands[0] + bands[1] + bands[2]) / 3.0
@@ -95,18 +128,19 @@ pan_matched = pan * (intensity.mean() / pan.mean())
 delta = pan_matched - intensity
 
 
-# Percentile stretch para 8 bits
+# % Stretch e conversão para 8 bits
 def normalize(arr):
     low, high = np.percentile(arr, (2, 98))
     normalized = (arr - low) / (high - low)
     return (np.clip(normalized, 0, 1) * 255).astype(np.uint8)
 
 
-# Normalizar bandas
+# Aplicar delta e normalizar
 fused = [normalize(b + delta) for b in bands]
 
-# Salvar TIFF (preserva metadados e georreferencial)
-output_name = os.path.join("imagens", f"cbers4a_fused_ihs_wpm_{band_input}.tiff")
+# Salvar TIFF
+os.makedirs("imagens", exist_ok=True)
+output_name = os.path.join("imagens", f"cbers4a_2020_{band_input}.tiff")
 profile = {
     "driver": "GTiff",
     "dtype": "uint8",
@@ -122,5 +156,5 @@ with rasterio.open(output_name, "w", **profile) as dst:
         dst.write(band, i)
     dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue]
 
-print(f"Salvo: {output_name} ({width}x{height} px, 4m, EPSG:32721)")
+print(f"Salvo: {output_name} ({width}x{height} px, {TARGET_RES}m, EPSG:32721)")
 print(f"Tempo corrido: {time.time() - t0:.1f}s")
