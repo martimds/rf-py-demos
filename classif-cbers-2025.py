@@ -4,6 +4,7 @@ import time
 
 os.environ["GDAL_HTTP_MULTIPLEX"] = "YES"
 os.environ["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] = "YES"
+os.environ["GDAL_DISABLE_READDIR_ON_OPEN"] = "EMPTY_DIR"
 
 import geopandas as gpd
 import numpy as np
@@ -16,10 +17,8 @@ from rasterio.transform import from_bounds as transform_from_bounds
 from rasterio.windows import from_bounds
 from sklearn.ensemble import RandomForestClassifier
 
-# Bounding box Sinop-MT
 bbox_sinop = [-55.62, -11.95, -55.40, -11.78]
 
-# Buscar imagem CBERS-4A MUX
 service = pystac_client.Client.open("https://data.inpe.br/bdc/stac/v1/")
 item_search = service.search(
     collections=["CB4A-MUX-L4-SR-1"],
@@ -29,12 +28,10 @@ item_search = service.search(
 )
 item = list(item_search.items())[0]
 
-# Converter bbox para EPSG:32721
 transformer = Transformer.from_crs("EPSG:4326", "EPSG:32721", always_xy=True)
 minx, miny = transformer.transform(bbox_sinop[0], bbox_sinop[1])
 maxx, maxy = transformer.transform(bbox_sinop[2], bbox_sinop[3])
 
-# Grid 20m (resolução nativa MUX)
 TARGET_RES = 20.0
 width = int((maxx - minx) // TARGET_RES)
 height = int((maxy - miny) // TARGET_RES)
@@ -42,14 +39,12 @@ maxx = minx + width * TARGET_RES
 maxy = miny + height * TARGET_RES
 target_transform = transform_from_bounds(minx, miny, maxx, maxy, width, height)
 
-# 4 bandas MUX
 BAND_MAP = {0: "BAND5", 1: "BAND6", 2: "BAND7", 3: "BAND8"}
 
 CACHE_DIR = "cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 
-# Baixar recorte COG e salvar no diretório cache
 def download_crop(key):
     local_path = os.path.join(CACHE_DIR, f"{item.id}_{key}_crop.tif")
 
@@ -88,7 +83,6 @@ def download_crop(key):
     return local_path
 
 
-# Ler banda do cache local
 def read_band(local_path):
     with rasterio.open(local_path) as src:
         return src.read(1).astype(np.float32)
@@ -96,7 +90,6 @@ def read_band(local_path):
 
 t0 = time.time()
 
-# Baixar recortes em paralelo
 print("Lendo bandas CBERS-4A MUX 2025...")
 assets = [BAND_MAP[b] for b in range(4)]
 
@@ -106,13 +99,10 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
 
 print(f"Download concluído em {time.time() - t0:.1f}s. Processando...")
 
-# Ler bandas do cache
 bands = np.stack([read_band(p) for p in local_paths])  # (4, H, W)
 
-# Carregar amostras
 gdf = gpd.read_file("samplecbers2025.gpkg").to_crs("EPSG:32721")
 
-# Rasterizar amostras
 labels = rasterize(
     [(geom, val) for geom, val in zip(gdf.geometry, gdf["uso_solo"])],
     out_shape=(height, width),
@@ -121,21 +111,17 @@ labels = rasterize(
     dtype=np.uint8,
 )
 
-# Extrair pixels de treino
 mask = labels > 0  # type: ignore
 X_train = bands[:, mask].T
 y_train = labels[mask]  # type: ignore
 
-# Treinar Random Forest
 print(f"Treinando RF com {X_train.shape[0]} pixels...")
 clf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
 clf.fit(X_train, y_train)
 
-# Classificar imagem inteira
 X_all = bands.reshape(4, -1).T
 y_pred = clf.predict(X_all).reshape(height, width).astype(np.uint8)
 
-# Salvar resultado
 os.makedirs("imagens", exist_ok=True)
 output_name = os.path.join("imagens", "classif_cbers4a_2025_rf.tiff")
 profile = {
