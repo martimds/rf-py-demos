@@ -45,8 +45,16 @@ stats = img.reduceRegion(
 lows = ee.Image.constant([stats.getNumber(f"{b}_p2") for b in selected_bands])
 highs = ee.Image.constant([stats.getNumber(f"{b}_p98") for b in selected_bands])
 
+GAMMA_MAP = {"B2": 0.9, "B3": 0.6, "B4": 0.8, "B8": 0.8}
+gammas = ee.Image.constant([GAMMA_MAP[b] for b in selected_bands])
+
 result = (
-    img.subtract(lows).divide(highs.subtract(lows)).clamp(0, 1).multiply(255).toUint8()
+    img.subtract(lows)
+    .divide(highs.subtract(lows))
+    .clamp(0, 1)
+    .pow(gammas)
+    .multiply(255)
+    .toUint8()
 )
 
 url = result.getDownloadURL(
