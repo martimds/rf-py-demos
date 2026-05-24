@@ -1,4 +1,6 @@
+import concurrent.futures
 import os
+import time
 
 os.environ["GDAL_HTTP_MULTIPLEX"] = "YES"
 os.environ["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] = "YES"
@@ -17,47 +19,95 @@ from sklearn.ensemble import RandomForestClassifier
 # Bounding box Sinop-MT
 bbox_sinop = [-55.62, -11.95, -55.40, -11.78]
 
-# Buscar imagem CBERS-4A 2020
+# Buscar imagem CBERS-4A MUX
 service = pystac_client.Client.open("https://data.inpe.br/bdc/stac/v1/")
 item_search = service.search(
-    collections=["CB4A-WPM-L4-DN-1"],
+    collections=["CB4A-MUX-L4-SR-1"],
     bbox=bbox_sinop,
-    datetime="2020-01-01/2020-12-31",
+    datetime="",
     query={"eo:cloud_cover": {"lt": 10}},
 )
-item = list(item_search.items())[4]
+item = list(item_search.items())[0]
 
 # Converter bbox para EPSG:32721
 transformer = Transformer.from_crs("EPSG:4326", "EPSG:32721", always_xy=True)
 minx, miny = transformer.transform(bbox_sinop[0], bbox_sinop[1])
 maxx, maxy = transformer.transform(bbox_sinop[2], bbox_sinop[3])
 
-# Grid 8m (resolução nativa multiespectrais)
-TARGET_RES = 8.0
+# Grid 20m (resolução nativa MUX)
+TARGET_RES = 20.0
 width = int((maxx - minx) // TARGET_RES)
 height = int((maxy - miny) // TARGET_RES)
 maxx = minx + width * TARGET_RES
 maxy = miny + height * TARGET_RES
 target_transform = transform_from_bounds(minx, miny, maxx, maxy, width, height)
 
-# Ler 4 bandas multiespectrais
-BAND_MAP = {1: "BAND1", 2: "BAND2", 3: "BAND3", 4: "BAND4"}
+# 4 bandas MUX
+BAND_MAP = {0: "BAND5", 1: "BAND6", 2: "BAND7", 3: "BAND8"}
+
+CACHE_DIR = "cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 
-def read_band(asset_key):
-    with rasterio.open(item.assets[asset_key].href) as src:
+# Baixar recorte COG e salvar no diretório cache
+def download_crop(key):
+    local_path = os.path.join(CACHE_DIR, f"{item.id}_{key}_crop.tif")
+
+    if os.path.exists(local_path):
+        print(f"Cache hit: {key}")
+        return local_path
+
+    print(f"Baixando recorte de {key}...")
+    with rasterio.open(item.assets[key].href) as src:
         window = (
             from_bounds(minx, miny, maxx, maxy, src.transform)
             .round_offsets()
             .round_lengths()
         )
-        return src.read(
-            1, window=window, out_shape=(height, width), resampling=Resampling.nearest
-        ).astype(np.float32)
+        data = src.read(
+            1,
+            window=window,
+            out_shape=(height, width),
+            resampling=Resampling.nearest,
+        )
+
+        profile = src.profile.copy()
+        profile.update(
+            driver="GTiff",
+            height=height,
+            width=width,
+            count=1,
+            dtype=data.dtype,
+            transform=target_transform,
+        )
+
+        with rasterio.open(local_path, "w", **profile) as dst:
+            dst.write(data, 1)
+
+    print(f"Concluído: {key}")
+    return local_path
 
 
-print("Lendo bandas CBERS-4A 2020...")
-bands = np.stack([read_band(BAND_MAP[b]) for b in range(1, 5)])  # (4, H, W)
+# Ler banda do cache local
+def read_band(local_path):
+    with rasterio.open(local_path) as src:
+        return src.read(1).astype(np.float32)
+
+
+t0 = time.time()
+
+# Baixar recortes em paralelo
+print("Lendo bandas CBERS-4A MUX 2020...")
+assets = [BAND_MAP[b] for b in range(4)]
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    futures = [executor.submit(download_crop, key) for key in assets]
+    local_paths = [f.result() for f in futures]
+
+print(f"Download concluído em {time.time() - t0:.1f}s. Processando...")
+
+# Ler bandas do cache
+bands = np.stack([read_band(p) for p in local_paths])  # (4, H, W)
 
 # Carregar amostras
 gdf = gpd.read_file("samplecbers2020.gpkg").to_crs("EPSG:32721")
@@ -86,6 +136,7 @@ X_all = bands.reshape(4, -1).T
 y_pred = clf.predict(X_all).reshape(height, width).astype(np.uint8)
 
 # Salvar resultado
+os.makedirs("imagens", exist_ok=True)
 output_name = os.path.join("imagens", "classif_cbers4a_2020_rf.tiff")
 profile = {
     "driver": "GTiff",
@@ -99,4 +150,5 @@ profile = {
 with rasterio.open(output_name, "w", **profile) as dst:
     dst.write(y_pred, 1)
 
-print(f"Salvo: {output_name} ({width}x{height} px, 8m)")
+print(f"Salvo: {output_name} ({width}x{height} px, 20m)")
+print(f"Tempo total: {time.time() - t0:.1f}s")
