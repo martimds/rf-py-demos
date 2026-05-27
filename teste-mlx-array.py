@@ -8,8 +8,8 @@ import mlx.core as mx
 from async_tiff import TIFF
 from async_tiff.store import LocalStore
 
-INPUT = Path("imagens/sentinel2_2020_321.tiff")
-OUTPUT = Path("imagens/sentinel2_2020_321_mlx.tiff")
+INPUT = Path("IMAGES/cbers4a_2020_indices.tiff")
+OUTPUT = Path("IMAGES/cbers4a_2020_indices_mlx.tiff")
 SCALE = 1.5
 
 
